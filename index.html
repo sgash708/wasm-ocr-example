@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>Go + WebAssembly OCRデモ</title>
+    <style>
+body {
+  font-family: Arial, sans-serif;
+  max-width: 1000px;
+  margin: 0 auto;
+  padding: 20px;
+}
+        .container {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 20px;
+        }
+        .image-container {
+          flex: 1;
+          min-width: 300px;
+        }
+        .controls {
+          margin: 20px 0;
+        }
+        canvas {
+          max-width: 100%;
+          border: 1px solid #ccc;
+        }
+        .result {
+          margin-top: 20px;
+          padding: 10px;
+          background-color: #f5f5f5;
+          border-radius: 4px;
+        }
+        button {
+          padding: 8px 16px;
+          background-color: #4CAF50;
+          color: white;
+          border: none;
+          border-radius: 4px;
+          cursor: pointer;
+          margin-right: 10px;
+        }
+        button:hover {
+          background-color: #45a049;
+        }
+        input[type=range] {
+          width: 200px;
+        }
+        .loading {
+          display: none;
+          margin-top: 20px;
+          font-style: italic;
+        }
+    </style>
+    <!-- 先にWASMサポートスクリプトを読み込む -->
+    <script src="wasm_exec.js"></script>
+    <!-- Tesseract.jsを最新かつCORSに対応したCDNから読み込み -->
+    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@4.1.1/dist/tesseract.min.js"></script>
+  </head>
+  <body>
+    <h1>Go + WebAssembly OCRデモ</h1>
+    <p>画像をアップロードして、OCR処理を行います。画像は前処理（グレースケール化・二値化）されてからTesseract.jsにより文字認識されます。</p>
+
+    <div class="controls">
+      <input type="file" id="imageInput" accept="image/*">
+      <button id="preprocessBtn">前処理</button>
+      <button id="recognizeBtn">文字認識</button>
+    </div>
+
+    <div>
+      <label for="thresholdSlider">二値化閾値: <span id="thresholdValue">128</span></label>
+      <input type="range" id="thresholdSlider" min="0" max="255" value="128">
+    </div>
+
+    <div class="container">
+      <div class="image-container">
+        <h3>元画像</h3>
+        <canvas id="originalCanvas"></canvas>
+      </div>
+      <div class="image-container">
+        <h3>処理後画像</h3>
+        <canvas id="processedCanvas"></canvas>
+      </div>
+    </div>
+
+    <div class="loading" id="loadingMessage">
+      文字認識処理中...しばらくお待ちください
+    </div>
+
+    <div class="result" id="resultContainer">
+      <h3>認識結果</h3>
+      <div id="recognizedText"></div>
+    </div>
+
+    <script>
+      // WebAssemblyのロード
+      const go = new Go();
+      let wasmLoaded = false;
+
+      // ページの読み込みが完了したらWASMを初期化
+      document.addEventListener('DOMContentLoaded', async function() {
+        try {
+          // WASMモジュールを読み込む
+          const result = await WebAssembly.instantiateStreaming(
+            fetch("main.wasm"),
+            go.importObject
+          );
+          go.run(result.instance);
+          wasmLoaded = true;
+          console.log("WebAssembly module loaded");
+        } catch (err) {
+          console.error("Failed to load WebAssembly module:", err);
+        }
+
+        // Tesseractが正しく読み込まれたか確認
+        if (typeof Tesseract !== 'undefined') {
+          console.log("Tesseract.js loaded successfully");
+        } else {
+          console.error("Tesseract.js not loaded, trying to load again");
+          // スクリプトタグで直接読み込む試行
+          const script = document.createElement('script');
+          script.src = "https://cdn.jsdelivr.net/npm/tesseract.js@v5.0.3/dist/tesseract.min.js";
+          document.head.appendChild(script);
+        }
+      });
+
+      // DOM要素の取得
+      const imageInput = document.getElementById('imageInput');
+      const originalCanvas = document.getElementById('originalCanvas');
+      const processedCanvas = document.getElementById('processedCanvas');
+      const preprocessBtn = document.getElementById('preprocessBtn');
+      const recognizeBtn = document.getElementById('recognizeBtn');
+      const thresholdSlider = document.getElementById('thresholdSlider');
+      const thresholdValue = document.getElementById('thresholdValue');
+      const recognizedText = document.getElementById('recognizedText');
+      const loadingMessage = document.getElementById('loadingMessage');
+
+      // キャンバスコンテキスト
+      const originalCtx = originalCanvas.getContext('2d');
+      const processedCtx = processedCanvas.getContext('2d');
+
+      // 画像データ
+      let originalImage = null;
+      let processedImageData = null;
+
+      // ファイル選択時の処理
+      imageInput.addEventListener('change', function(e) {
+        if (e.target.files.length === 0) return;
+
+        const file = e.target.files[0];
+        const reader = new FileReader();
+
+        reader.onload = function(event) {
+          const img = new Image();
+          img.onload = function() {
+            // キャンバスサイズを設定
+            originalCanvas.width = img.width;
+            originalCanvas.height = img.height;
+            processedCanvas.width = img.width;
+            processedCanvas.height = img.height;
+
+            // 元画像を描画
+            originalCtx.drawImage(img, 0, 0);
+            originalImage = img;
+
+            // 処理後キャンバスをクリア
+            processedCtx.clearRect(0, 0, processedCanvas.width, processedCanvas.height);
+
+            // 認識結果をクリア
+            recognizedText.textContent = '';
+          };
+          img.src = event.target.result;
+        };
+
+        reader.readAsDataURL(file);
+      });
+
+      // 前処理ボタンのクリックイベント
+      preprocessBtn.addEventListener('click', function() {
+        if (!wasmLoaded) {
+          alert("WebAssemblyモジュールがまだロードされていません");
+          return;
+        }
+
+        if (!originalImage) {
+          alert("画像を選択してください");
+          return;
+        }
+
+        try {
+          // 元画像をBase64エンコード
+          const dataURL = originalCanvas.toDataURL('image/png');
+          const base64Data = dataURL.replace(/^data:image\/(png|jpg|jpeg);base64,/, '');
+
+          // WASMで二値化処理
+          const threshold = parseInt(thresholdSlider.value);
+          const processedData = binarizeImage(base64Data, threshold);
+
+          // 処理後画像を表示
+          const processedImg = new Image();
+          processedImg.onload = function() {
+            processedCtx.drawImage(processedImg, 0, 0);
+            processedImageData = processedImg;
+          };
+          processedImg.src = 'data:image/png;base64,' + processedData;
+        } catch (err) {
+          console.error("Image processing error:", err);
+          alert("画像処理中にエラーが発生しました: " + err.message);
+        }
+      });
+
+      // 文字認識ボタンのクリックイベント
+      recognizeBtn.addEventListener('click', async function() {
+        if (!processedImageData) {
+          alert("まず画像の前処理を行ってください");
+          return;
+        }
+
+        // ローディングメッセージを表示
+        loadingMessage.style.display = 'block';
+        recognizedText.textContent = '';
+
+        try {
+          // Tesseractがグローバルに存在するか確認
+          if (typeof Tesseract === 'undefined') {
+            throw new Error('Tesseractライブラリが読み込まれていません。');
+          }
+
+          // 簡易版のOCR実行（Worker APIを避ける）
+          console.log("Starting OCR with simplified approach...");
+
+          // 画像データをDataURLとして取得
+          const imageData = processedCanvas.toDataURL('image/png');
+
+          try {
+            // Tesseract v5の新しいAPI
+            const result = await Tesseract.recognize(
+              imageData,
+              'jpn+eng',
+              {
+                logger: progress => {
+                  console.log('OCR進行状況:', progress);
+                  if (progress.status === 'recognizing text') {
+                    loadingMessage.textContent = `文字認識処理中... ${(progress.progress * 100).toFixed(1)}%`;
+                  }
+              }
+          }
+                  );
+
+                  // 認識結果を表示
+                  console.log("Recognition completed");
+                  recognizedText.textContent = result.data.text || "テキストが認識できませんでした";
+                } catch (err) {
+                  console.error("OCR simplified approach failed:", err);
+
+                  // フォールバック：画像を直接使用
+                  try {
+                    console.log("Trying fallback method...");
+                    const img = new Image();
+                    img.src = imageData;
+
+                    const result = await Tesseract.recognize(
+                      img,
+                      'jpn+eng',
+                      { logger: m => console.log(m) }
+                    );
+
+                    recognizedText.textContent = result.data.text || "テキストが認識できませんでした";
+                  } catch (fallbackErr) {
+                    console.error("Fallback OCR failed:", fallbackErr);
+                    recognizedText.textContent = "OCR処理に失敗しました: " + fallbackErr.message;
+                  }
+                }
+      } catch (error) {
+        console.error("OCR処理中にエラーが発生しました:", error);
+        recognizedText.textContent = "エラー: " + error.message;
+      } finally {
+        // ローディングメッセージを非表示
+        loadingMessage.style.display = 'none';
+      }
+});
+
+            // 閾値スライダーの変更イベント
+            thresholdSlider.addEventListener('input', function() {
+              thresholdValue.textContent = this.value;
+            });
+    </script>
+  </body>
+</html>
