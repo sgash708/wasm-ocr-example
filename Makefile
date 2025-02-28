@@ -17,6 +17,7 @@ setup:
 	@which go > /dev/null || (echo "Goがインストールされていません。インストールしてください。" && exit 1)
 	@cp "$(shell go env GOROOT)/lib/wasm/wasm_exec.js" build/
 	@cp index.html build/
+	@cp index.js build/
 	@echo "セットアップが完了しました。"
 
 # ビルド：GoコードをWASMにコンパイル
